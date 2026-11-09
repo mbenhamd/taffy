@@ -20,6 +20,7 @@ mod hand_written {
     mod flex_writing_modes;
     mod floats;
     mod grid_detailed_layout_info;
+    mod grid_min_size_contribution;
     mod grid_percentage_rerun;
     mod initial_containing_block;
     mod intrinsic_width;
