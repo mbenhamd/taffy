@@ -955,21 +955,33 @@ pub fn compute_grid_layout<Tree: LayoutGridContainer>(
 }
 
 /// The size, in one axis, of the grid area spanning `spanned` (track vector indexes, excluding the
-/// area's bounding lines): the spanned tracks' and gutters' base sizes, summed in the same order as the
-/// track-sizing estimates the item was measured against, plus the content-alignment free space that
-/// `align_tracks` placed between the spanned tracks. The free space before the area's physically
-/// first track (its logical first track, or its logical last track when `axis_is_reversed`) lies
-/// outside the area.
+/// area's bounding lines): the spanned tracks' and gutters' base sizes plus the content-alignment free
+/// space that `align_tracks` placed between the spanned tracks. That space is placed before a track in
+/// physical order, so it is attributed to the gutter physically before it: the gutter at index `i` gets
+/// the `alignment_offset` of track `i + 1`, or of track `i - 1` when `axis_is_reversed` (RTL). The free
+/// space before the area's physically first track lies outside the area.
+///
+/// The size is summed by `GridTrack::span_size`, element by element in the same order as the measure
+/// pass's estimate (`GridItem::grid_area_size`), so where a gutter's `content_alignment_adjustment`
+/// equals the space placed there the item gets exactly the size it was measured against.
 fn grid_area_size_in_axis(tracks: &[GridTrack], spanned: Range<usize>, axis_is_reversed: bool) -> f32 {
-    let spanned = &tracks[spanned];
-    let base_size: f32 = spanned.iter().map(|track| track.base_size).sum();
-    let inner = if axis_is_reversed {
-        spanned.split_last().map(|(_, rest)| rest)
-    } else {
-        spanned.split_first().map(|(_, rest)| rest)
-    };
-    let distributed: f32 = inner.unwrap_or(&[]).iter().map(|track| track.alignment_offset).sum();
-    base_size + distributed
+    GridTrack::span_size(
+        tracks,
+        spanned,
+        |track| Some(track.base_size),
+        |index| {
+            // Odd indexes are tracks and even indexes are gutters. A span starts and ends with a track, so
+            // both neighbours of a spanned gutter are spanned tracks.
+            if index % 2 == 1 {
+                0.0
+            } else if axis_is_reversed {
+                tracks[index - 1].alignment_offset
+            } else {
+                tracks[index + 1].alignment_offset
+            }
+        },
+    )
+    .unwrap_or(0.0)
 }
 
 /// Resolve the static-position rectangle (the grid area determined by the grid-placement

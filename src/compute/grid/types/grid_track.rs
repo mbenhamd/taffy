@@ -171,4 +171,21 @@ impl GridTrack {
             0.0
         }
     }
+
+    /// The size of a span of tracks and gutters (`spanned`: track vector indexes, excluding the span's bounding
+    /// lines): the sum, in logical order, of `size(track) + extra(index)` for each spanned track or gutter, or
+    /// `None` if any `size` is `None`.
+    ///
+    /// Both the measure pass (`GridItem::grid_area_size`, where `extra` is the gutter's
+    /// `content_alignment_adjustment`) and the final pass (where `extra` is the free space content alignment
+    /// placed at the gutter) size grid areas through this one function, so an area whose inputs agree gets the
+    /// same `f32` size in both passes.
+    pub fn span_size(
+        tracks: &[GridTrack],
+        spanned: core::ops::Range<usize>,
+        size: impl Fn(&GridTrack) -> Option<f32>,
+        extra: impl Fn(usize) -> f32,
+    ) -> Option<f32> {
+        spanned.map(|index| size(&tracks[index]).map(|size| size + extra(index))).sum::<Option<f32>>()
+    }
 }
