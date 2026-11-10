@@ -22,6 +22,7 @@ mod hand_written {
     mod floats;
     mod grid_area_size;
     mod grid_detailed_layout_info;
+    mod grid_fit_content_fr;
     mod grid_min_size_contribution;
     mod grid_percentage_rerun;
     mod initial_containing_block;
