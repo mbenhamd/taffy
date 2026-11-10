@@ -333,6 +333,9 @@ struct AlgoConstants {
     /// it is indefinite for the purposes of resolving percentage sizes of items and collecting items
     /// into flex lines. See <https://www.w3.org/TR/css-flexbox-1/#definite-sizes>.
     known_main_size_is_definite: bool,
+    /// Whether the node is a multi-line container whose main axis is its block axis, being measured
+    /// for its min-content inline size. Its items are then collected into a single flex line.
+    single_line_for_min_content_inline_size: bool,
     /// Whether the node has a known main size which is definite (as of the start of layout,
     /// before the main size is determined from the node's contents)
     has_definite_main_size: bool,
@@ -479,6 +482,19 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
         available_space,
         inputs.parent_writing_mode,
     );
+    // The min-content cross size of a multi-line container whose main axis is its block axis is the
+    // largest min-content contribution of its items (CSS Flexbox 1 §9.9.2), whatever the source of its
+    // block size: its own definite size or max size, or a size fixed or stretched by its parent. Its
+    // max-content cross size still wraps against that block size (Chrome agrees with both). The axes
+    // are logical, so in a vertical writing mode this applies to `row wrap`, not `column wrap`.
+    // `flex-wrap: balance` with a `flex-line-count` above one also collapses to a single line here.
+    // Spec: https://www.w3.org/TR/css-flexbox-1/#intrinsic-cross-sizes
+    let inline_axis = if constants.dir.is_row() { RequestedAxis::Vertical } else { RequestedAxis::Horizontal };
+    constants.single_line_for_min_content_inline_size = constants.is_wrap
+        && !constants.flow.main_axis_is_inline
+        && run_mode == RunMode::ComputeSize
+        && inputs.axis == inline_axis
+        && available_space.cross(constants.dir) == AvailableSpace::MinContent;
 
     // 9. Flex Layout Algorithm
 
@@ -856,6 +872,7 @@ fn compute_constants(
         node_outer_size,
         node_inner_size,
         known_main_size_is_definite,
+        single_line_for_min_content_inline_size: false,
         has_definite_main_size,
         has_definite_cross_size,
         cross_axis_available_space_is_definite,
@@ -1411,7 +1428,8 @@ fn collect_flex_lines<'a>(
     // Wrapping into multiple lines requires a definite main size. If the container's known main size
     // is derived from its own content (and is thus indefinite) then all items are collected into a
     // single flex line, matching how the container was sized under a min/max-content constraint.
-    if !constants.is_wrap || !constants.known_main_size_is_definite {
+    if !constants.is_wrap || !constants.known_main_size_is_definite || constants.single_line_for_min_content_inline_size
+    {
         let mut lines = new_vec_with_capacity(1);
         lines.push(FlexLine { items: flex_items.as_mut_slice(), cross_size: 0.0, offset_cross: 0.0 });
         lines
@@ -1500,6 +1518,11 @@ fn collect_balanced_flex_lines<'a>(
 ) -> Vec<FlexLine<'a>> {
     if flex_items.is_empty() {
         return new_vec_with_capacity(0);
+    }
+    if constants.single_line_for_min_content_inline_size {
+        let mut lines = new_vec_with_capacity(1);
+        lines.push(FlexLine { items: flex_items, cross_size: 0.0, offset_cross: 0.0 });
+        return lines;
     }
 
     // If the container's known main size is derived from its own content (and is thus indefinite)
