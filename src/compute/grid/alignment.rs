@@ -68,6 +68,7 @@ pub(super) fn align_tracks(
             0.0
         };
 
+        track.alignment_offset = offset;
         track.offset = total_offset + offset;
         total_offset = total_offset + offset + track.base_size;
         if is_non_collapsed_track {
@@ -87,7 +88,10 @@ pub(super) fn align_and_position_item(
     tree: &mut impl LayoutGridContainer,
     node: NodeId,
     order: u32,
-    grid_area: Rect<f32>,
+    // The physical left/top edge of the item's grid area.
+    grid_area_origin: Point<f32>,
+    // The size of the item's grid area (see `grid_area_size_in_axis`).
+    grid_area_size: Size<f32>,
     // Percentage basis for the item's styles. Grid passes the grid area size; grid lanes (css-grid-3) items
     // have the container's content box as their containing block in the stacking axis.
     containing_block_size: Size<f32>,
@@ -100,8 +104,6 @@ pub(super) fn align_and_position_item(
     #[cfg(feature = "content_size")] container_is_scroll_container: bool,
     bubbled_candidates: &mut OofCandidates,
 ) -> (Rect<f32>, f32, f32, Option<f32>, Option<f32>) {
-    let grid_area_size = Size { width: grid_area.right - grid_area.left, height: grid_area.bottom - grid_area.top };
-
     let style = tree.get_grid_child_style(node);
 
     let overflow = style.overflow();
@@ -418,7 +420,8 @@ pub(super) fn align_and_position_item(
     let Size { width, height } = size.unwrap_or(layout_output.size).maybe_clamp(min_size, max_size);
 
     let (x, x_margin) = align_item_within_area(
-        Line { start: grid_area.left, end: grid_area.right },
+        grid_area_origin.x,
+        grid_area_size.width,
         alignment_styles.horizontal,
         width,
         position,
@@ -428,7 +431,8 @@ pub(super) fn align_and_position_item(
         direction,
     );
     let (y_without_relative_offset, y_margin) = align_item_within_area(
-        Line { start: grid_area.top, end: grid_area.bottom },
+        grid_area_origin.y,
+        grid_area_size.height,
         alignment_styles.vertical,
         height,
         position,
@@ -507,7 +511,8 @@ pub(super) fn align_and_position_item(
 /// Align and size a grid item along a single axis
 #[allow(clippy::too_many_arguments)]
 pub(super) fn align_item_within_area(
-    grid_area: Line<f32>,
+    grid_area_start: f32,
+    grid_area_size: f32,
     alignment_style: AlignSelf,
     resolved_size: f32,
     position: Position,
@@ -518,7 +523,7 @@ pub(super) fn align_item_within_area(
 ) -> (f32, Line<f32>) {
     // Calculate grid area dimension in the axis
     let non_auto_margin = Line { start: margin.start.unwrap_or(0.0) + baseline_shim, end: margin.end.unwrap_or(0.0) };
-    let grid_area_size = f32_max(grid_area.end - grid_area.start, 0.0);
+    let grid_area_size = f32_max(grid_area_size, 0.0);
     let free_space = f32_max(grid_area_size - resolved_size - non_auto_margin.sum(), 0.0);
 
     // Expand auto margins to fill available space
@@ -577,7 +582,7 @@ pub(super) fn align_item_within_area(
         alignment_based_offset
     };
 
-    (grid_area.start + offset_within_area, resolved_margin)
+    (grid_area_start + offset_within_area, resolved_margin)
 }
 
 /// The offset applied to an item in a single axis by its `inset` if it is `position: relative`

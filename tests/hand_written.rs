@@ -10,6 +10,7 @@ mod hand_written {
     mod block_replaced;
     mod border_and_padding;
     mod caching;
+    mod column_wrap_intrinsic_width;
     mod compressible_replaced;
     mod detailed_grid_info;
     mod fit_content_calc;
@@ -19,7 +20,10 @@ mod hand_written {
     mod flex_line_count;
     mod flex_writing_modes;
     mod floats;
+    mod grid_area_size;
     mod grid_detailed_layout_info;
+    mod grid_fit_content_fr;
+    mod grid_min_size_contribution;
     mod grid_percentage_rerun;
     mod initial_containing_block;
     mod intrinsic_width;

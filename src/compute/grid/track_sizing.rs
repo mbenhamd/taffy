@@ -348,6 +348,16 @@ pub(super) fn track_sizing_algorithm<Tree: LayoutPartialTree>(
         }
     };
 
+    // A grid container whose inline size is indefinite but which is sized into a definite available inline space
+    // (a fit-content inline size: e.g. a non-stretched flex item's cross size, `width: fit-content`, a float or an
+    // inline-grid) is no wider than that space unless its content forces it to be: fit-content is
+    // min(max-content, max(min-content, available)). Flexible tracks therefore expand to their max-content flex
+    // fraction only while that fits, and otherwise fill the available space (CSS Sizing 3 §5.2, CSS Grid 1 §12.7).
+    let fit_content_limit = match (axis, inner_node_size.get(axis), available_grid_space.get(axis)) {
+        (AbstractAxis::Inline, None, AvailableSpace::Definite(available_space)) => Some(available_space),
+        _ => None,
+    };
+
     // 11.7. Expand Flexible Tracks
     // This step sizes flexible tracks using the largest value it can assign to an fr without exceeding the available space.
     expand_flexible_tracks(
@@ -359,6 +369,7 @@ pub(super) fn track_sizing_algorithm<Tree: LayoutPartialTree>(
         axis_min_size,
         axis_max_size,
         axis_available_space_for_expansion,
+        fit_content_limit,
         inner_node_size,
         get_track_size_estimate,
     );
@@ -627,7 +638,8 @@ fn resolve_intrinsic_track_sizes<Tree: LayoutPartialTree>(
                             // (note that overflow:hidden counts as a scroll container), giving the automatic minimum size of scroll
                             // containers (zero) precedence over the min-content contributions.
                             AvailableSpace::MinContent | AvailableSpace::MaxContent
-                                if !item.overflow.get(axis).is_scroll_container() =>
+                                if !item.overflow.get(axis).is_scroll_container()
+                                    && item.min_size.get(axis).is_auto() =>
                             {
                                 let axis_minimum_size = item_sizer.minimum_contribution(item, axis_tracks);
                                 let axis_min_content_size = item_sizer.min_content_contribution(item, axis_tracks);
@@ -723,7 +735,7 @@ fn resolve_intrinsic_track_sizes<Tree: LayoutPartialTree>(
             // a scroll container), giving the automatic minimum size of scroll containers (zero) precedence over the min-content contributions.
             let space = match axis_available_grid_space {
                 AvailableSpace::MinContent | AvailableSpace::MaxContent
-                    if !item.overflow.get(axis).is_scroll_container() =>
+                    if !item.overflow.get(axis).is_scroll_container() && item.min_size.get(axis).is_auto() =>
                 {
                     let axis_minimum_size = item_sizer.minimum_contribution(item, axis_tracks);
                     let axis_min_content_size = item_sizer.min_content_contribution(item, axis_tracks);
@@ -1248,6 +1260,7 @@ fn expand_flexible_tracks<Tree: LayoutPartialTree>(
     axis_min_size: Option<f32>,
     axis_max_size: Option<f32>,
     axis_available_space_for_expansion: AvailableSpace,
+    fit_content_limit: Option<f32>,
     inner_node_size: Size<Option<f32>>,
     get_track_size_estimate: impl Fn(&GridTrack, Option<f32>, &Tree) -> Option<f32>,
 ) {
@@ -1305,21 +1318,34 @@ fn expand_flexible_tracks<Tree: LayoutPartialTree>(
                     .unwrap_or(0.0),
             );
 
+            let hypothetical_grid_size = |flex_fraction: f32| -> f32 {
+                axis_tracks
+                    .iter()
+                    .map(|track| {
+                        if track.max_track_sizing_function.is_fr() {
+                            let track_flex_factor = track.max_track_sizing_function.0.value();
+                            f32_max(track.base_size, track_flex_factor * flex_fraction)
+                        } else {
+                            track.base_size
+                        }
+                    })
+                    .sum()
+            };
+
+            // Under a fit-content inline size, a max-content grid wider than the available space is sized to that
+            // space instead: the flex fraction is found with the available space as the space to fill.
+            let flex_fraction = match fit_content_limit {
+                Some(limit) if hypothetical_grid_size(flex_fraction) > limit => {
+                    f32_max(find_size_of_fr(axis_tracks, limit), 0.0)
+                }
+                _ => flex_fraction,
+            };
+
             // If using this flex fraction would cause the grid to be smaller than the grid container’s min-width/height (or larger than the
             // grid container’s max-width/height), then redo this step, treating the free space as definite and the available grid space as equal
             // to the grid container’s inner size when it’s sized to its min-width/height (max-width/height).
             // (Note: min_size takes precedence over max_size)
-            let hypothetical_grid_size: f32 = axis_tracks
-                .iter()
-                .map(|track| {
-                    if track.max_track_sizing_function.is_fr() {
-                        let track_flex_factor = track.max_track_sizing_function.0.value();
-                        f32_max(track.base_size, track_flex_factor * flex_fraction)
-                    } else {
-                        track.base_size
-                    }
-                })
-                .sum();
+            let hypothetical_grid_size = hypothetical_grid_size(flex_fraction);
             let axis_min_size = axis_min_size.unwrap_or(0.0);
             let axis_max_size = axis_max_size.unwrap_or(f32::INFINITY);
             if hypothetical_grid_size < axis_min_size {

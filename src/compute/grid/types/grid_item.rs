@@ -509,13 +509,12 @@ impl GridItem {
 
         size.set(
             axis.other(),
-            other_axis_tracks[self.track_range_excluding_lines(axis.other())]
-                .iter()
-                .map(|track| {
-                    get_track_size_estimate(track, available_space.get(axis.other()))
-                        .map(|size| size + track.content_alignment_adjustment)
-                })
-                .sum::<Option<f32>>(),
+            GridTrack::span_size(
+                other_axis_tracks,
+                self.track_range_excluding_lines(axis.other()),
+                |track| get_track_size_estimate(track, available_space.get(axis.other())),
+                |index| other_axis_tracks[index].content_alignment_adjustment,
+            ),
         );
 
         size

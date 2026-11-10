@@ -719,29 +719,33 @@ pub fn compute_grid_layout<Tree: LayoutGridContainer>(
     // Position in-flow children (stored in items vector)
     for (index, item) in items.iter_mut().enumerate() {
         // Tracks are stored in logical order. In RTL the physical offsets are assigned
-        // right-to-left, so an item's physical left edge is derived from its logical end
-        // line and its physical right edge from its logical start line.
-        let grid_area = Rect {
-            top: rows[item.row_indexes.start as usize + 1].offset,
-            bottom: rows[item.row_indexes.end as usize].offset,
-            left: if direction.is_rtl() {
+        // right-to-left, so an item's physical left edge is derived from its logical end line.
+        let grid_area_origin = Point {
+            x: if direction.is_rtl() {
                 columns[item.column_indexes.end as usize - 1].offset
             } else {
                 columns[item.column_indexes.start as usize + 1].offset
             },
-            right: if direction.is_rtl() {
-                columns[item.column_indexes.start as usize].offset
-            } else {
-                columns[item.column_indexes.end as usize].offset
-            },
+            y: rows[item.row_indexes.start as usize + 1].offset,
+        };
+        // The area's size is summed from its tracks rather than taken as the difference of its edge
+        // offsets: in f32, `(a + b) - a` can fall short of `b`, and the item was measured against `b`.
+        let grid_area_size = Size {
+            width: grid_area_size_in_axis(
+                &columns,
+                item.track_range_excluding_lines(AbstractAxis::Inline),
+                direction.is_rtl(),
+            ),
+            height: grid_area_size_in_axis(&rows, item.track_range_excluding_lines(AbstractAxis::Block), false),
         };
         #[cfg_attr(not(feature = "content_size"), allow(unused_variables))]
         let (overflow_contribution, y_position, height, baseline, last_baseline) = align_and_position_item(
             tree,
             item.node,
             index as u32,
-            grid_area,
-            Size { width: grid_area.right - grid_area.left, height: grid_area.bottom - grid_area.top },
+            grid_area_origin,
+            grid_area_size,
+            grid_area_size,
             container_alignment_styles,
             item.baseline_shim,
             direction,
@@ -948,6 +952,36 @@ pub fn compute_grid_layout<Tree: LayoutGridContainer>(
     output.oof_candidates = oof_candidates;
     output.oof_positioning_area = oof_positioning_area;
     output
+}
+
+/// The size, in one axis, of the grid area spanning `spanned` (track vector indexes, excluding the
+/// area's bounding lines): the spanned tracks' and gutters' base sizes plus the content-alignment free
+/// space that `align_tracks` placed between the spanned tracks. That space is placed before a track in
+/// physical order, so it is attributed to the gutter physically before it: the gutter at index `i` gets
+/// the `alignment_offset` of track `i + 1`, or of track `i - 1` when `axis_is_reversed` (RTL). The free
+/// space before the area's physically first track lies outside the area.
+///
+/// The size is summed by `GridTrack::span_size`, element by element in the same order as the measure
+/// pass's estimate (`GridItem::grid_area_size`), so where a gutter's `content_alignment_adjustment`
+/// equals the space placed there the item gets exactly the size it was measured against.
+fn grid_area_size_in_axis(tracks: &[GridTrack], spanned: Range<usize>, axis_is_reversed: bool) -> f32 {
+    GridTrack::span_size(
+        tracks,
+        spanned,
+        |track| Some(track.base_size),
+        |index| {
+            // Odd indexes are tracks and even indexes are gutters. A span starts and ends with a track, so
+            // both neighbours of a spanned gutter are spanned tracks.
+            if index % 2 == 1 {
+                0.0
+            } else if axis_is_reversed {
+                tracks[index - 1].alignment_offset
+            } else {
+                tracks[index + 1].alignment_offset
+            }
+        },
+    )
+    .unwrap_or(0.0)
 }
 
 /// Resolve the static-position rectangle (the grid area determined by the grid-placement
