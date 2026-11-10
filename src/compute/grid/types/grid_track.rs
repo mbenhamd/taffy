@@ -36,6 +36,10 @@ pub(in super::super) struct GridTrack {
     /// The distance of the start of the track from the start of the grid container
     pub offset: f32,
 
+    /// The free space that content alignment (align-content/justify-content) placed immediately
+    /// before the track in physical order. Zero for gutters and collapsed tracks. Set by `align_tracks`.
+    pub alignment_offset: f32,
+
     /// The size (width/height as applicable) of the track
     pub base_size: f32,
 
@@ -75,6 +79,7 @@ impl GridTrack {
             min_track_sizing_function,
             max_track_sizing_function,
             offset: 0.0,
+            alignment_offset: 0.0,
             base_size: 0.0,
             growth_limit: 0.0,
             content_alignment_adjustment: 0.0,
