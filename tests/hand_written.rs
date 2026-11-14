@@ -37,6 +37,7 @@ mod hand_written {
     mod relayout;
     mod root_constraints;
     mod rounding;
+    mod row_wrap_min_content_width;
     mod safe_alignment;
     mod scroll_size;
     mod scrollable_overflow;
