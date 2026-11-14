@@ -1685,7 +1685,9 @@ fn determine_container_main_size(
                     size
                 }
             }
-            AvailableSpace::MinContent if constants.is_wrap => {
+            // A wrapping row container's min-content size is computed with the general
+            // intrinsic contributions below.
+            AvailableSpace::MinContent if constants.is_wrap && !constants.is_row => {
                 let longest_line_length: f32 = lines
                     .iter()
                     .map(|line| {
@@ -1712,6 +1714,14 @@ fn determine_container_main_size(
                 //   "The flex container’s max-content size is the largest sum of the afore-calculated sizes of all items within a single line."
                 let mut main_size = 0.0;
 
+                // The min-content main size of a multi-line row container is the largest min-content
+                // contribution among its items (CSS Flexbox 1 §9.9.1): each item may sit on its own line,
+                // and an item's flex basis does not raise its contribution. This matches Chrome.
+                // https://www.w3.org/TR/css-flexbox-1/#intrinsic-main-sizes
+                let is_multi_line_row_min_content =
+                    constants.is_wrap && constants.is_row && available_space.main(dir) == AvailableSpace::MinContent;
+                let mut largest_min_content_contribution = 0.0f32;
+
                 for line in lines.iter_mut() {
                     for item in line.items.iter_mut() {
                         let style_min = item.min_size.main(constants.dir);
@@ -1734,8 +1744,10 @@ fn determine_container_main_size(
                         } else {
                             Some(item.flex_basis)
                         };
-                        let flex_basis_min = clamping_basis.filter(|_| item.flex_shrink == 0.0);
-                        let flex_basis_max = clamping_basis.filter(|_| item.flex_grow == 0.0);
+                        let flex_basis_min =
+                            clamping_basis.filter(|_| item.flex_shrink == 0.0 && !is_multi_line_row_min_content);
+                        let flex_basis_max =
+                            clamping_basis.filter(|_| item.flex_grow == 0.0 && !is_multi_line_row_min_content);
 
                         let min_main_size = style_min
                             .maybe_max(flex_basis_min)
@@ -1753,7 +1765,11 @@ fn determine_container_main_size(
 
                             // Else compute the min- or -max content size and apply the full formula for computing the
                             // min- or max- content contribution
-                            _ if item.is_scroll_container() => item.flex_basis + margin_sum,
+                            // A scroll container's min-content contribution in a multi-line row is still
+                            // its content's min-content size (as in Chrome), so it is measured below.
+                            _ if item.is_scroll_container() && !is_multi_line_row_min_content => {
+                                item.flex_basis + margin_sum
+                            }
 
                             // If the item has a definite preferred main size then that is its content
                             // contribution (an inherent-size measure of the item would return it), floored
@@ -1763,7 +1779,10 @@ fn determine_container_main_size(
                                 let item_pb_main = item.padding.main_axis_sum(constants.dir)
                                     + item.border.main_axis_sum(constants.dir);
                                 let inner_main_size = pref.max(item_pb_main);
-                                if constants.is_row {
+                                if is_multi_line_row_min_content {
+                                    // Min/max clamp the item's own size; its margins add on top.
+                                    inner_main_size.maybe_clamp(style_min, style_max) + margin_sum
+                                } else if constants.is_row {
                                     (inner_main_size + margin_sum).maybe_clamp(style_min, style_max)
                                 } else {
                                     (inner_main_size.max(item.flex_basis) + margin_sum)
@@ -1854,7 +1873,10 @@ fn determine_container_main_size(
                                 //
                                 // Ultimately, this was not found by reading the spec, but by trial and error fixing tests to align with Webkit/Firefox output.
                                 // (see the `flex_basis_unconstraint_row` and `flex_basis_uncontraint_column` generated tests which demonstrate this)
-                                if constants.is_row {
+                                if is_multi_line_row_min_content {
+                                    // Min/max clamp the item's own size; its margins add on top.
+                                    inner_main_size.maybe_clamp(style_min, style_max) + margin_sum
+                                } else if constants.is_row {
                                     (inner_main_size + margin_sum).maybe_clamp(style_min, style_max)
                                 } else {
                                     (inner_main_size.max(item.flex_basis) + margin_sum)
@@ -1862,6 +1884,11 @@ fn determine_container_main_size(
                                 }
                             }
                         };
+                        if is_multi_line_row_min_content {
+                            largest_min_content_contribution =
+                                f32_max(largest_min_content_contribution, content_contribution);
+                            continue;
+                        }
                         item.content_flex_fraction = {
                             let diff = content_contribution - margin_sum - item.flex_basis;
                             if diff > 0.0 {
@@ -1874,6 +1901,10 @@ fn determine_container_main_size(
                                 0.0
                             }
                         };
+                    }
+
+                    if is_multi_line_row_min_content {
+                        continue;
                     }
 
                     // TODO Spec says to scale everything by the line's max flex fraction. But neither Chrome nor firefox implement this
@@ -1933,6 +1964,10 @@ fn determine_container_main_size(
 
                     let gap_sum = sum_axis_gaps(constants.gap.main(constants.dir), line.items.len());
                     main_size = f32_max(main_size, f32_max(largest_item_size, item_main_size_sum + gap_sum))
+                }
+
+                if is_multi_line_row_min_content {
+                    main_size = largest_min_content_contribution;
                 }
 
                 main_size + main_content_box_inset
