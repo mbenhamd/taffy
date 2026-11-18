@@ -14248,6 +14248,26 @@ mod flex {
     }
 
     #[test]
+    fn flex_row_fit_content_shrinks_to_available_space__border_box_ltr() {
+        crate::run_xml_test("flex", "flex_row_fit_content_shrinks_to_available_space__border_box_ltr");
+    }
+
+    #[test]
+    fn flex_row_fit_content_shrinks_to_available_space__content_box_ltr() {
+        crate::run_xml_test("flex", "flex_row_fit_content_shrinks_to_available_space__content_box_ltr");
+    }
+
+    #[test]
+    fn flex_row_fit_content_shrinks_to_available_space__border_box_rtl() {
+        crate::run_xml_test("flex", "flex_row_fit_content_shrinks_to_available_space__border_box_rtl");
+    }
+
+    #[test]
+    fn flex_row_fit_content_shrinks_to_available_space__content_box_rtl() {
+        crate::run_xml_test("flex", "flex_row_fit_content_shrinks_to_available_space__content_box_rtl");
+    }
+
+    #[test]
     fn flex_row_relative_all_sides__border_box_ltr() {
         crate::run_xml_test("flex", "flex_row_relative_all_sides__border_box_ltr");
     }
