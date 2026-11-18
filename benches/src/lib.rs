@@ -2,6 +2,8 @@
 // of false positives for this lint. So let's just disable it for this code.
 #![allow(dead_code)]
 
+#[cfg(feature = "cephal")]
+pub mod cephal_helpers;
 pub mod pangui_template;
 pub mod taffy_helpers;
 pub use taffy_helpers::TaffyTreeBuilder;
@@ -13,6 +15,12 @@ pub mod taffy_03_helpers;
 pub mod yoga_helpers;
 #[cfg(feature = "yoga")]
 pub use yoga_helpers::YogaTreeBuilder;
+
+#[cfg(feature = "morphorm")]
+pub mod morphorm_helpers;
+
+#[cfg(feature = "torin")]
+pub mod torin_helpers;
 
 use criterion::measurement::WallTime;
 use criterion::{Bencher, BenchmarkGroup, Criterion, SamplingMode};

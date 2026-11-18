@@ -320,20 +320,30 @@ where
         },
     };
 
+    // Physical overflow in the padding-box frame; an RTL inline axis scrolls from the right edge
     #[cfg(feature = "content_size")]
     let overflow = {
         let scrolls = style.overflow().x.is_scroll_container() || style.overflow().y.is_scroll_container();
-        let start = if style.direction().is_rtl() { padding.right } else { padding.left };
-        let end = if style.direction().is_rtl() { padding.left } else { padding.right };
-        Rect {
-            left: 0.0,
-            top: 0.0,
-            right: start + measured_size.width + if scrolls { end } else { 0.0 },
-            bottom: padding.top + measured_size.height + if scrolls { padding.bottom } else { 0.0 },
-        }
+        let is_rtl = style.direction().is_rtl();
+        let start = if is_rtl { padding.right } else { padding.left };
+        let end = if is_rtl { padding.left } else { padding.right };
+        let client_size = size - border.sum_axes() - scrollbar_insets.sum_axes();
+        let client_width = client_size.width.max(0.0);
+        let content_end = start + measured_size.width + if scrolls { end } else { 0.0 };
+        super::common::scrollable_overflow::finalize_scrollable_overflow(
+            Rect {
+                left: if is_rtl { (client_width - content_end).min(0.0) } else { 0.0 },
+                right: if is_rtl { client_width } else { content_end },
+                top: 0.0,
+                bottom: padding.top + measured_size.height + if scrolls { padding.bottom } else { 0.0 },
+            },
+            client_size,
+            crate::geometry::Point { x: is_rtl, y: false },
+            scrolls,
+        )
     };
     #[cfg(not(feature = "content_size"))]
-    let overflow = Rect::ZERO;
+    let overflow = crate::tree::ScrollableOverflow::ZERO;
     let mut output = LayoutOutput::from_sizes(size, overflow);
     output.margins_can_collapse_through =
         !has_styles_preventing_being_collapsed_through && size.height == 0.0 && measured_size.height == 0.0;

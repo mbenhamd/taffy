@@ -2,7 +2,8 @@
 //! (<https://www.pangui.io/blog/05-layout-rework-and-benchmarks/>).
 //!
 //! Each file in the `pangui` directory is one benchmark, written in PanGUI's benchmark template format.
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::measurement::WallTime;
+use criterion::{criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
 use rand::Rng;
 use std::path::Path;
 use taffy::prelude::*;
@@ -13,27 +14,19 @@ use taffy_benchmarks::pangui_template::{
 };
 use taffy_benchmarks::{bench_layout, benchmark_group, BuildTree, BuildTreeExt, GenStyle, TaffyTreeBuilder};
 
+#[cfg(feature = "cephal")]
+use taffy_benchmarks::cephal_helpers::CephalTreeBuilder;
+#[cfg(feature = "morphorm")]
+use taffy_benchmarks::morphorm_helpers::MorphormTree;
 #[cfg(feature = "taffy03")]
 use taffy_benchmarks::taffy_03_helpers::Taffy03TreeBuilder;
+#[cfg(feature = "torin")]
+use taffy_benchmarks::torin_helpers::TorinTree;
 #[cfg(feature = "yoga")]
 use taffy_benchmarks::yoga_helpers::YogaTreeBuilder;
 
 /// The size that the root node is laid out into along an axis in which it does not have a size in pixels
 const DEFAULT_ROOT_SIZE: f32 = 1000.0;
-
-/// The benchmarks that are also run with `min-width: 0` and `min-height: 0` on every node that expands
-/// along the main axis of its parent.
-///
-/// PanGUI's `Expand` is translated to `flex: <weight> 1 0`, which leaves such nodes with the automatic minimum
-/// size of a flex item. That requires measuring the content of the node, which PanGUI has no equivalent of.
-/// This is the only benchmark in which it makes a difference: the layouts are the same, but take much longer.
-const ZERO_MIN_SIZE_BENCHMARKS: [&str; 1] = ["fit_nesting"];
-
-#[derive(Clone, Copy, PartialEq)]
-enum ExpandMinSize {
-    Auto,
-    Zero,
-}
 
 fn is_mode(size: &Option<BenchmarkSize>, mode: SizeMode) -> bool {
     size.is_some_and(|size| size.mode == mode)
@@ -59,13 +52,14 @@ fn min_max_size(size: &Option<BenchmarkSize>, property: &str) -> LengthPercentag
 
 /// Translate a node of a PanGUI template into a flexbox style. `parent_is_row` is whether the parent of the
 /// node lays out its children horizontally.
-fn style(node: &LayoutNode, parent_is_row: bool, expand_min_size: ExpandMinSize) -> TaffyStyle {
+fn style(node: &LayoutNode, parent_is_row: bool) -> TaffyStyle {
     let (main_size, main_min_size) =
         if parent_is_row { (&node.width, &node.min_width) } else { (&node.height, &node.min_height) };
 
     // A node which expands along the main axis of its parent shares out all of the space in the parent
-    // (`flex: <weight> 1 0`). A node which has `Expand` as its minimum size grows from its own size
-    // (`flex: <weight> 0 auto`). A node which expands along the cross axis is stretched by `align-items`.
+    // (`flex: <weight> 1 0` with a minimum size of 0, as PanGUI has no automatic minimum size). A node which
+    // has `Expand` as its minimum size grows from its own size (`flex: <weight> 0 auto`). A node which expands
+    // along the cross axis is stretched by `align-items`.
     let expands = is_mode(main_size, SizeMode::Expand);
     let (flex_grow, flex_shrink, flex_basis) = match (main_size, main_min_size) {
         (Some(BenchmarkSize { mode: SizeMode::Expand, value }), _) => (*value, 1.0, length(0.0)),
@@ -80,7 +74,7 @@ fn style(node: &LayoutNode, parent_is_row: bool, expand_min_size: ExpandMinSize)
     if !(!parent_is_row && is_mode(&node.min_height, SizeMode::Expand)) {
         min_size.height = min_max_size(&node.min_height, "MinHeight");
     }
-    if expands && expand_min_size == ExpandMinSize::Zero {
+    if expands {
         if parent_is_row && node.min_width.is_none() {
             min_size.width = length(0.0);
         }
@@ -152,18 +146,14 @@ impl GenStyle<TaffyStyle> for RootStyle {
     }
 }
 
-fn build_children<R: Rng, B: BuildTree<R, RootStyle>>(
-    builder: &mut B,
-    parent: &LayoutNode,
-    expand_min_size: ExpandMinSize,
-) -> Vec<B::Node> {
+fn build_children<R: Rng, B: BuildTree<R, RootStyle>>(builder: &mut B, parent: &LayoutNode) -> Vec<B::Node> {
     let parent_is_row = parent.flow_direction == Some(FlowDirection::Horizontal);
     parent
         .children
         .iter()
         .map(|child| {
-            let children = build_children(builder, child, expand_min_size);
-            builder.create_node_with_style(style(child, parent_is_row, expand_min_size), &children)
+            let children = build_children(builder, child);
+            builder.create_node_with_style(style(child, parent_is_row), &children)
         })
         .collect()
 }
@@ -177,7 +167,7 @@ fn root_size(size: &Option<BenchmarkSize>) -> f32 {
 }
 
 macro_rules! run_benchmark {
-    ($TreeBuilder: ty, $tree_builder_name: literal, $group: ident, $name: expr, $root: ident, $expand_min_size: expr) => {
+    ($TreeBuilder: ty, $tree_builder_name: literal, $group: ident, $name: expr, $root: ident) => {
         let mut tree = None;
         $group.bench_function(BenchmarkId::new($name, $tree_builder_name), |b| {
             bench_layout(
@@ -185,8 +175,8 @@ macro_rules! run_benchmark {
                 &mut tree,
                 || -> $TreeBuilder {
                     // The root node has no parent. PanGUI's own translation treats it as the child of a column.
-                    let mut builder = <$TreeBuilder>::new(RootStyle(style(&$root, false, $expand_min_size)));
-                    let children = build_children(&mut builder, &$root, $expand_min_size);
+                    let mut builder = <$TreeBuilder>::new(RootStyle(style(&$root, false)));
+                    let children = build_children(&mut builder, &$root);
                     builder.set_root_children(&children);
                     builder
                 },
@@ -198,14 +188,38 @@ macro_rules! run_benchmark {
 }
 
 macro_rules! benchmark_each_library {
-    ($group: ident, $name: expr, $root: ident, $expand_min_size: expr) => {
+    ($group: ident, $name: expr, $root: ident) => {
+        #[cfg(feature = "cephal")]
+        run_benchmark!(CephalTreeBuilder<_, _>, "cephal", $group, $name, $root);
         #[cfg(feature = "yoga")]
-        run_benchmark!(YogaTreeBuilder<_, _>, "Yoga", $group, $name, $root, $expand_min_size);
+        run_benchmark!(YogaTreeBuilder<_, _>, "Yoga", $group, $name, $root);
         #[cfg(feature = "taffy03")]
-        run_benchmark!(Taffy03TreeBuilder<_, _>, "Taffy 0.3", $group, $name, $root, $expand_min_size);
+        run_benchmark!(Taffy03TreeBuilder<_, _>, "Taffy 0.3", $group, $name, $root);
 
-        run_benchmark!(TaffyTreeBuilder<_, _>, "Taffy main", $group, $name, $root, $expand_min_size);
+        run_benchmark!(TaffyTreeBuilder<_, _>, "Taffy main", $group, $name, $root);
     };
+}
+
+/// Benchmark the layout libraries which have their own translation of the templates, rather than from a Taffy style.
+#[allow(unused_variables)]
+fn benchmark_native_libraries(group: &mut BenchmarkGroup<WallTime>, name: &str, root: &LayoutNode) {
+    let (width, height) = (root_size(&root.width), root_size(&root.height));
+
+    #[cfg(feature = "morphorm")]
+    if let Some(tree) = MorphormTree::new(root, width, height) {
+        let mut tree = Some(tree);
+        group.bench_function(BenchmarkId::new(name, "Morphorm"), |b| {
+            bench_layout(b, &mut tree, || unreachable!(), |_| {}, |tree| tree.compute_layout())
+        });
+    }
+
+    #[cfg(feature = "torin")]
+    if let Some(tree) = TorinTree::new(root, width, height) {
+        let mut tree = Some(tree);
+        group.bench_function(BenchmarkId::new(name, "Torin"), |b| {
+            bench_layout(b, &mut tree, || unreachable!(), |tree| tree.mark_all_dirty(), |tree| tree.compute_layout())
+        });
+    }
 }
 
 /// Read and parse every template in the `pangui` directory, in order of name
@@ -227,11 +241,8 @@ fn templates() -> Vec<(String, LayoutNode)> {
 fn pangui_benchmarks(c: &mut Criterion) {
     let mut group = benchmark_group(c, "PanGUI");
     for (name, root) in templates() {
-        benchmark_each_library!(group, name.as_str(), root, ExpandMinSize::Auto);
-        if ZERO_MIN_SIZE_BENCHMARKS.contains(&name.as_str()) {
-            let name = format!("{name} (min-size: 0)");
-            benchmark_each_library!(group, name.as_str(), root, ExpandMinSize::Zero);
-        }
+        benchmark_native_libraries(&mut group, name.as_str(), &root);
+        benchmark_each_library!(group, name.as_str(), root);
     }
     group.finish();
 }

@@ -229,7 +229,7 @@ impl LayoutGridContainer for TestTree {
 }
 
 impl taffy::CacheTree for TestTree {
-    fn cache_get(&mut self, _: NodeId, _: &LayoutInput) -> Option<LayoutOutput> {
+    fn cache_get(&self, _: NodeId, _: &LayoutInput) -> Option<LayoutOutput> {
         None
     }
     fn cache_store(&mut self, _: NodeId, _: &LayoutInput, _: LayoutOutput) {}

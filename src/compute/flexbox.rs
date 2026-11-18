@@ -23,7 +23,9 @@ use crate::{BoxGenerationMode, BoxSizing, Dimension, Direction, RequestedAxis};
 
 use super::common::alignment::apply_alignment_fallback;
 #[cfg(feature = "content_size")]
-use super::common::scrollable_overflow::compute_scrollable_overflow_contribution;
+use super::common::scrollable_overflow::{
+    compute_scrollable_overflow_contribution, finalize_scrollable_overflow, ScrollableOverflowContainer,
+};
 use super::common::sizing_keyword::{resolve_sizing_keyword, SizingKeywordResolution};
 
 /// The container's logical flex flow normalized into the physical coordinate
@@ -308,10 +310,13 @@ struct AlgoConstants {
     /// The space between the content box and the border box.
     /// This consists of padding + border + scrollbar_gutter.
     content_box_inset: Rect<f32>,
+    /// The border and scrollbar gutters surrounding the padding box.
+    padding_box_inset: Rect<f32>,
+    /// The resolved padding used for scrollable overflow contributions.
+    #[cfg(feature = "content_size")]
+    padding: Rect<f32>,
     /// The size reserved for scrollbar gutters in each axis
     scrollbar_gutter: Point<f32>,
-    /// Physical gutters supplied by the embedding.
-    scrollbar_insets: Rect<f32>,
     /// Whether the node being laid out is a scroll container
     #[cfg(feature = "content_size")]
     is_scroll_container: bool,
@@ -496,6 +501,12 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
         && inputs.axis == inline_axis
         && available_space.cross(constants.dir) == AvailableSpace::MinContent;
 
+    // A container with no children has no flex items or lines, so its size follows directly
+    // from its own style and the available space.
+    if tree.child_count(node) == 0 {
+        return compute_empty_container_layout(tree, inputs, constants);
+    }
+
     // 9. Flex Layout Algorithm
 
     // 9.1. Initial Setup
@@ -592,16 +603,9 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // If only the container's main size has been requested then we are done, as nothing below changes it. This
     // avoids measuring the cross size of every item.
-    if run_mode == RunMode::ComputeSize {
-        let main_axis_is_requested_axis = match inputs.axis {
-            RequestedAxis::Horizontal => constants.dir.is_row(),
-            RequestedAxis::Vertical => constants.dir.is_column(),
-            RequestedAxis::Both => false,
-        };
-        if main_axis_is_requested_axis {
-            let size = Size::ZERO.with_main(constants.dir, constants.container_size.main(constants.dir));
-            return LayoutOutput::from_outer_size(size);
-        }
+    if run_mode == RunMode::ComputeSize && constants.dir.main_axis_is_requested_axis(inputs.axis) {
+        let size = Size::ZERO.with_main(constants.dir, constants.container_size.main(constants.dir));
+        return LayoutOutput::from_outer_size(size);
     }
 
     // 6. Resolve the flexible lengths of all the flex items to find their used main size.
@@ -686,9 +690,8 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
     let mut candidates = OofCandidates::new();
     collect_oof_candidates(tree, node, &constants, &mut flex_lines, &mut candidates);
 
-    let absolute_position_inset = constants.border + constants.scrollbar_insets;
-    let absolute_position_area = constants.container_size - absolute_position_inset.sum_axes();
-    let absolute_position_offset = Point { x: absolute_position_inset.left, y: absolute_position_inset.top };
+    let absolute_position_area = constants.container_size - constants.padding_box_inset.sum_axes();
+    let absolute_position_offset = Point { x: constants.padding_box_inset.left, y: constants.padding_box_inset.top };
 
     debug_log!("hidden_layout");
     let len = tree.child_count(node);
@@ -737,12 +740,85 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     let mut output = LayoutOutput::from_sizes_and_baselines(
         constants.container_size,
-        inflow_overflow_rect,
+        {
+            #[cfg(feature = "content_size")]
+            {
+                finalize_scrollable_overflow(
+                    inflow_overflow_rect,
+                    constants.container_size
+                        - constants.border.sum_axes()
+                        - Size { width: constants.scrollbar_gutter.x, height: constants.scrollbar_gutter.y },
+                    constants.scroll_origin_reversed(),
+                    constants.is_scroll_container,
+                )
+            }
+            #[cfg(not(feature = "content_size"))]
+            {
+                let _ = inflow_overflow_rect;
+                crate::tree::ScrollableOverflow::ZERO
+            }
+        },
         Baselines { first: first_vertical_baseline, last: last_vertical_baseline },
     );
     output.oof_candidates = candidates;
     output.oof_positioning_area =
         Some(OofPositioningArea { size: absolute_position_area, offset: absolute_position_offset });
+    output
+}
+
+/// Compute the layout of a flex container with no children. Equivalent to running the remainder of
+/// [`compute_preliminary`] with zero flex items, without generating items or lines.
+fn compute_empty_container_layout(
+    tree: &mut impl LayoutFlexboxContainer,
+    inputs: LayoutInput,
+    mut constants: AlgoConstants,
+) -> LayoutOutput {
+    let LayoutInput { known_dimensions, available_space, run_mode, .. } = inputs;
+    let dir = constants.dir;
+
+    let available_space = determine_available_space(known_dimensions, available_space, &constants);
+
+    if let Some(inner_main_size) = constants.node_inner_size.main(dir) {
+        let outer_main_size = inner_main_size + constants.content_box_inset.main_axis_sum(dir);
+        constants.inner_container_size.set_main(dir, inner_main_size);
+        constants.container_size.set_main(dir, outer_main_size);
+    } else {
+        determine_container_main_size(tree, available_space, &mut [], &mut constants);
+    }
+
+    if run_mode == RunMode::ComputeSize && dir.main_axis_is_requested_axis(inputs.axis) {
+        let size = Size::ZERO.with_main(dir, constants.container_size.main(dir));
+        return LayoutOutput::from_outer_size(size);
+    }
+
+    let _ = determine_container_cross_size(&[], known_dimensions, &mut constants);
+
+    // With no children there are no out-of-flow candidates, so the positioning area's value is
+    // never read. It still has to be `Some`: that is what makes `compute_oof_layout` clear a
+    // stale hoisted-children list from a run in which the container still had descendants.
+    let mut output = LayoutOutput::from_outer_size(constants.container_size);
+    #[cfg(feature = "content_size")]
+    {
+        output.scrollable_overflow_rect = finalize_scrollable_overflow(
+            Rect {
+                right: if constants.layout_direction.is_rtl() {
+                    (constants.container_size.width
+                        - constants.border.horizontal_axis_sum()
+                        - constants.scrollbar_gutter.x)
+                        .max(0.0)
+                } else {
+                    0.0
+                },
+                ..Rect::ZERO
+            },
+            constants.container_size
+                - constants.border.sum_axes()
+                - Size { width: constants.scrollbar_gutter.x, height: constants.scrollbar_gutter.y },
+            constants.scroll_origin_reversed(),
+            constants.is_scroll_container,
+        );
+    }
+    output.oof_positioning_area = Some(OofPositioningArea { size: Size::ZERO, offset: Point::ZERO });
     output
 }
 
@@ -818,6 +894,9 @@ fn compute_constants(
     };
     let content_box_inset = padding + border + scrollbar_insets;
 
+    // Physical scrollbar insets place a leading (e.g. RTL) gutter before the padding box
+    let padding_box_inset = border + scrollbar_insets;
+
     let node_outer_size = known_dimensions;
     let node_inner_size = node_outer_size.maybe_sub(content_box_inset.sum_axes());
     let known_main_size_is_definite = known_dimensions_are_definite.main(dir);
@@ -862,8 +941,10 @@ fn compute_constants(
         border,
         gap,
         content_box_inset,
+        padding_box_inset,
+        #[cfg(feature = "content_size")]
+        padding,
         scrollbar_gutter,
-        scrollbar_insets,
         #[cfg(feature = "content_size")]
         is_scroll_container,
         align_items,
@@ -2860,7 +2941,7 @@ fn calculate_flex_item(
     total_offset_cross: f32,
     line_offset_cross: f32,
     #[cfg(feature = "content_size")] total_overflow_rect: &mut Rect<f32>,
-    #[cfg(feature = "content_size")] border: Rect<f32>,
+    #[cfg(feature = "content_size")] overflow_container: &ScrollableOverflowContainer,
     constants: &AlgoConstants,
 ) {
     let container_size = constants.container_size;
@@ -2966,27 +3047,19 @@ fn calculate_flex_item(
 
     #[cfg(feature = "content_size")]
     {
-        let reversed = constants.flow.scroll_origin_is_reversed();
-        let contribution_location = Point {
-            x: if reversed.width {
-                container_size.width - location.x - size.width - border.right - constants.scrollbar_insets.right
-            } else {
-                location.x - border.left - constants.scrollbar_insets.left
-            },
-            y: if reversed.height {
-                container_size.height - location.y - size.height - border.bottom - constants.scrollbar_insets.bottom
-            } else {
-                location.y - border.top - constants.scrollbar_insets.top
-            },
-        };
-        *total_overflow_rect = total_overflow_rect.union(compute_scrollable_overflow_contribution(
+        let contribution_location =
+            Point { x: location.x - constants.padding_box_inset.left, y: location.y - constants.padding_box_inset.top };
+        let contribution = compute_scrollable_overflow_contribution(
             contribution_location,
             size,
-            scrollable_overflow_rect,
+            scrollable_overflow_rect.rect(),
+            item.border,
             item.overflow,
             item.contain,
-            constants.is_scroll_container,
-        ));
+            overflow_container,
+            item.margin,
+        );
+        *total_overflow_rect = total_overflow_rect.union(contribution);
     }
 }
 
@@ -2997,7 +3070,7 @@ fn calculate_layout_line(
     line: &mut FlexLine,
     total_offset_cross: &mut f32,
     #[cfg(feature = "content_size")] overflow_rect: &mut Rect<f32>,
-    #[cfg(feature = "content_size")] border: Rect<f32>,
+    #[cfg(feature = "content_size")] overflow_container: &ScrollableOverflowContainer,
     constants: &AlgoConstants,
 ) {
     let container_size = constants.container_size;
@@ -3027,7 +3100,7 @@ fn calculate_layout_line(
                 #[cfg(feature = "content_size")]
                 overflow_rect,
                 #[cfg(feature = "content_size")]
-                border,
+                overflow_container,
                 constants,
             );
         }
@@ -3042,7 +3115,7 @@ fn calculate_layout_line(
                 #[cfg(feature = "content_size")]
                 overflow_rect,
                 #[cfg(feature = "content_size")]
-                border,
+                overflow_container,
                 constants,
             );
         }
@@ -3060,6 +3133,15 @@ fn final_layout_pass(
     flex_lines: &mut [FlexLine],
     constants: &AlgoConstants,
 ) -> Rect<f32> {
+    #[cfg(feature = "content_size")]
+    let overflow_container = ScrollableOverflowContainer {
+        parent_is_scroll_container: constants.is_scroll_container,
+        parent_size: constants.container_size
+            - constants.border.sum_axes()
+            - Size { width: constants.scrollbar_gutter.x, height: constants.scrollbar_gutter.y },
+        reversed: constants.scroll_origin_reversed(),
+        padding: constants.padding,
+    };
     let mut total_offset_cross = if constants.flow.cross_axis_start_reversed {
         constants.container_size.cross(constants.dir) - constants.content_box_inset.cross_end(constants.dir)
     } else {
@@ -3078,7 +3160,7 @@ fn final_layout_pass(
                 #[cfg(feature = "content_size")]
                 &mut overflow_rect,
                 #[cfg(feature = "content_size")]
-                constants.border,
+                &overflow_container,
                 constants,
             );
         }
@@ -3091,30 +3173,51 @@ fn final_layout_pass(
                 #[cfg(feature = "content_size")]
                 &mut overflow_rect,
                 #[cfg(feature = "content_size")]
-                constants.border,
+                &overflow_container,
                 constants,
             );
         }
     }
 
-    // A scroll container's own padding at the end of the content is part of its scrollable
-    // overflow region, so it is included in the overflow rect. Boxes that are not scroll
-    // containers do not extend their overflow region by their own padding.
     #[cfg(feature = "content_size")]
-    if constants.is_scroll_container {
-        let reversed = constants.flow.scroll_origin_is_reversed();
-        overflow_rect.right += if reversed.width {
-            constants.content_box_inset.left - constants.border.left - constants.scrollbar_gutter.x
-        } else {
-            constants.content_box_inset.right - constants.border.right - constants.scrollbar_gutter.x
-        };
-        overflow_rect.bottom += if reversed.height {
-            constants.content_box_inset.top - constants.border.top - constants.scrollbar_gutter.y
-        } else {
-            constants.content_box_inset.bottom - constants.border.bottom - constants.scrollbar_gutter.y
-        };
+    if constants.layout_direction.is_rtl() {
+        let client_width =
+            (constants.container_size.width - constants.border.horizontal_axis_sum() - constants.scrollbar_gutter.x)
+                .max(0.0);
+        overflow_rect = overflow_rect.union(Rect { right: client_width, ..Rect::ZERO });
     }
 
+    // A scroll container's scroll origin is its padding-box edge on the flow-start side. On an
+    // axis whose origin is reversed (RTL inline progression, `*-reverse`, `wrap-reverse`, in any
+    // writing mode) that edge is the physical right or bottom, so the region reaches it.
+    #[cfg(feature = "content_size")]
+    if constants.is_scroll_container {
+        let reversed = constants.scroll_origin_reversed();
+        let client_size = Size {
+            width: (constants.container_size.width
+                - constants.border.horizontal_axis_sum()
+                - constants.scrollbar_gutter.x)
+                .max(0.0),
+            height: (constants.container_size.height
+                - constants.border.vertical_axis_sum()
+                - constants.scrollbar_gutter.y)
+                .max(0.0),
+        };
+        overflow_rect = overflow_rect.union(Rect {
+            left: if reversed.x { (client_size.width - constants.padding.left).min(0.0) } else { 0.0 },
+            right: if reversed.x {
+                client_size.width
+            } else {
+                constants.content_box_inset.right - constants.border.right - constants.scrollbar_gutter.x
+            },
+            top: if reversed.y { (client_size.height - constants.padding.top).min(0.0) } else { 0.0 },
+            bottom: if reversed.y {
+                client_size.height
+            } else {
+                constants.content_box_inset.bottom - constants.border.bottom - constants.scrollbar_gutter.y
+            },
+        });
+    }
     overflow_rect
 }
 
@@ -3391,7 +3494,7 @@ mod balance {
         fn suffix_greedy_line_counts(&self) -> Vec<u32> {
             let item_count = self.item_count();
             let mut counts: Vec<u32> = new_vec_with_capacity(item_count + 1);
-            counts.extend(core::iter::repeat(0).take(item_count + 1));
+            counts.extend(core::iter::repeat_n(0, item_count + 1));
             // The (exclusive) end of the greedy first line of the suffix, which only moves
             // down as the suffix grows leftwards since lines starting earlier are larger
             let mut line_end = item_count;
@@ -3507,7 +3610,7 @@ mod balance {
         let zero_end = (row.fit_ends[start] as usize).min(row.max_end);
         if row.sizes.is_zero_item(zero_end + 1) {
             let cost = row.sizes.line_cost(start, zero_end) + row.prev[zero_end + 1];
-            if cost < min_cost || (cost == min_cost && min_end.map_or(true, |end| end < zero_end)) {
+            if cost < min_cost || (cost == min_cost && min_end.is_none_or(|end| end < zero_end)) {
                 min_cost = cost;
                 min_end = Some(zero_end);
             }
@@ -3569,7 +3672,7 @@ mod balance {
         if line_count == item_count {
             // One item per line is the only division (this covers `flex-line-count` of at least
             // the item count as well as every item overflowing a line of its own)
-            item_counts.extend(core::iter::repeat(1).take(item_count));
+            item_counts.extend(core::iter::repeat_n(1, item_count));
             return item_counts;
         }
 
@@ -3592,9 +3695,9 @@ mod balance {
             prev.push(sizes.line_cost(start, item_count - 1));
         }
         let mut cur: Vec<f64> = new_vec_with_capacity(item_count);
-        cur.extend(core::iter::repeat(INFEASIBLE).take(item_count));
+        cur.extend(core::iter::repeat_n(INFEASIBLE, item_count));
         let mut opts: Vec<u32> = new_vec_with_capacity((line_count - 1) * item_count);
-        opts.extend(core::iter::repeat(0).take((line_count - 1) * item_count));
+        opts.extend(core::iter::repeat_n(0, (line_count - 1) * item_count));
         for lines in 2..=line_count {
             // The remaining `lines - 1` lines need one item each, bounding this line's end
             let max_end = item_count - lines;
@@ -3813,5 +3916,16 @@ mod balance {
                 );
             }
         }
+    }
+}
+
+#[cfg(feature = "content_size")]
+impl AlgoConstants {
+    /// Map main/cross reversal to physical axes, including RTL inline progression.
+    fn scroll_origin_reversed(&self) -> Point<bool> {
+        // The resolved flow already projects `*-reverse`, `wrap-reverse`, the inline direction
+        // and the writing mode onto physical axes.
+        let reversed = self.flow.scroll_origin_is_reversed();
+        Point { x: reversed.width, y: reversed.height }
     }
 }

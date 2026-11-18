@@ -2,7 +2,8 @@
 #[cfg(not(feature = "std"))]
 use slotmap::SecondaryMap;
 #[cfg(feature = "std")]
-use slotmap::SparseSecondaryMap as SecondaryMap;
+/// Node contexts, hashed with FxHash.
+type SecondaryMap<K, V> = slotmap::SparseSecondaryMap<K, V, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 use slotmap::{DefaultKey, SlotMap};
 
 #[cfg(feature = "block_layout")]
@@ -147,7 +148,7 @@ impl NodeData {
 
 /// An entire tree of UI nodes. The entry point to Taffy's high-level API.
 ///
-/// Allows you to build a tree of UI nodes, run Taffy's layout algorithms over that tree, and then access the resultant layout.]
+/// Allows you to build a tree of UI nodes, run Taffy's layout algorithms over that tree, and then access the resultant layout.
 #[derive(Debug, Clone)]
 pub struct TaffyTree<NodeContext = ()> {
     /// The [`NodeData`] for each node stored in this tree
@@ -215,7 +216,7 @@ impl<NodeContext> TraverseTree for TaffyTree<NodeContext> {}
 
 // CacheTree impl for TaffyTree
 impl<NodeContext> CacheTree for TaffyTree<NodeContext> {
-    fn cache_get(&mut self, node_id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
+    fn cache_get(&self, node_id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
         self.nodes[node_id.into()].cache.get(input)
     }
 
@@ -310,6 +311,10 @@ where
         // and thus that we should lay out this node using hidden layout regardless of it's own display style.
         if inputs.run_mode == RunMode::PerformHiddenLayout {
             debug_log!("HIDDEN");
+            // `round_layout` reaches out-of-flow boxes only through their containing block's
+            // hoisted child list, and a box inside a hidden subtree is in no such list. Write the
+            // final layout here so that it does not keep the layout from an earlier visible pass.
+            self.taffy.nodes[node_id.into()].final_layout = Layout::with_order(0);
             return compute_hidden_layout(self, node_id);
         }
 
@@ -511,7 +516,7 @@ where
         &Style,
     ) -> LayoutOutput,
 {
-    fn cache_get(&mut self, node_id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
+    fn cache_get(&self, node_id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
         self.taffy.nodes[node_id.into()].cache.get(input)
     }
 
@@ -693,6 +698,9 @@ impl<NodeContext> TaffyTree<NodeContext> {
             nodes: SlotMap::with_capacity(capacity),
             children: SlotMap::with_capacity(capacity),
             parents: SlotMap::with_capacity(capacity),
+            #[cfg(feature = "std")]
+            node_context_data: SecondaryMap::with_capacity_and_hasher(capacity, Default::default()),
+            #[cfg(not(feature = "std"))]
             node_context_data: SecondaryMap::with_capacity(capacity),
             config: TaffyConfig::default(),
         }

@@ -68,8 +68,8 @@ fn leading_physical_insets_do_not_create_phantom_scrollable_overflow() {
             let container = tree.layout(0);
             assert_eq!(
                 taffy::Size {
-                    width: container.scrollable_overflow_rect.right,
-                    height: container.scrollable_overflow_rect.bottom
+                    width: container.scrollable_overflow_rect.right(),
+                    height: container.scrollable_overflow_rect.bottom()
                 },
                 Size { width: 182.0, height: 70.0 },
                 "{display:?} {direction:?}"
@@ -88,15 +88,16 @@ fn physical_insets_reduce_the_scrollport_without_inflating_overflow_content() {
         for direction in [Direction::Ltr, Direction::Rtl] {
             let mut root = definite_container(display, insets);
             root.style.direction = direction;
+            // Scrollbar insets exist only on a scroll container, whose reversed (RTL) inline origin
+            // measures the range leftward.
+            root.style.overflow = Point { x: taffy::Overflow::Scroll, y: taffy::Overflow::Scroll };
             let mut tree = TestTree::new(root, overflowing_child());
             tree.compute(Size::MAX_CONTENT);
 
             let container = tree.layout(0);
+            let overflow = container.scrollable_overflow_rect;
             assert_eq!(
-                taffy::Size {
-                    width: container.scrollable_overflow_rect.right,
-                    height: container.scrollable_overflow_rect.bottom
-                },
+                taffy::Size { width: overflow.right() - overflow.left(), height: overflow.bottom() - overflow.top() },
                 Size { width: 400.0, height: 200.0 },
                 "{display:?} {direction:?}"
             );
@@ -121,8 +122,8 @@ fn absolute_overflow_is_also_relative_to_the_inner_scrollport_origin() {
         let container = tree.layout(0);
         assert_eq!(
             taffy::Size {
-                width: container.scrollable_overflow_rect.right,
-                height: container.scrollable_overflow_rect.bottom
+                width: container.scrollable_overflow_rect.right(),
+                height: container.scrollable_overflow_rect.bottom()
             },
             Size { width: 400.0, height: 200.0 },
             "{display:?}"
