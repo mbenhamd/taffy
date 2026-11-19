@@ -284,10 +284,17 @@ fn content_slot_after_last_segment_stays_below_floats() {
     for direction in [taffy::FloatDirection::Left, taffy::FloatDirection::Right] {
         let mut context = taffy::FloatContext::new();
         context.set_width(200.0);
-        context.place_floated_box(0, Size { width: 200.0, height: 80.0 }, 0.0, [0.0; 2], direction, Clear::None);
-        let beside = context.find_content_slot(0.0, [0.0; 2], Clear::None, None);
+        context.place_floated_box(
+            0,
+            Size { width: 200.0, height: 80.0 },
+            0.0,
+            taffy::FloatInsets::ZERO,
+            direction,
+            Clear::None,
+        );
+        let beside = context.find_content_slot(0.0, 0.0, taffy::FloatInsets::ZERO, Clear::None, None);
         assert_eq!(beside.width, 0.0);
-        let below = context.find_content_slot(0.0, [0.0; 2], Clear::None, beside.segment_id);
+        let below = context.find_content_slot(0.0, 0.0, taffy::FloatInsets::ZERO, Clear::None, beside.segment_id);
         assert_eq!(below.segment_id, None);
         assert_eq!(below.y, 80.0);
         assert_eq!(below.width, 200.0);

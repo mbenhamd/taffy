@@ -62,7 +62,7 @@ fn block_content_end_excludes_positioned_overflow_and_tracks_percentages() {
             assert_eq!(tree.layout(1).location.y, 10.0 + if relative { 50.0 } else { 0.0 });
             assert_eq!(tree.layout(2).size.height, 110.0);
             #[cfg(feature = "content_size")]
-            assert!(result.scrollable_overflow_rect.bottom > result.block_content_end.unwrap());
+            assert!(result.scrollable_overflow_rect.bottom() > result.block_content_end.unwrap());
         }
     }
 }
